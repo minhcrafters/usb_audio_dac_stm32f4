@@ -7,3 +7,4 @@ edition = "2024"
 serialport = "4.7"
 hound = "3.5"
 rubato = "0.16"
+clap = { version = "4.5.48", features = ["derive"] }

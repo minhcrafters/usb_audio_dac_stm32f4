@@ -55,10 +55,10 @@ SPI_HandleTypeDef hspi1;
 #define AUDIO_BUFFER_HALF_SIZE (AUDIO_BUFFER_SIZE / 2)
 #define BUFFER_TIMEOUT_MS 100
 
-int16_t buffer_audio[AUDIO_BUFFER_SIZE * AUDIO_CHANNELS]; // Single audio buffer
+volatile int16_t buffer_audio[AUDIO_BUFFER_SIZE * AUDIO_CHANNELS]; // Single audio buffer
 volatile uint32_t audio_buffer_w_ptr = 0; // Write pointer
 volatile uint32_t last_data_time = 0; // Last time data was received
-int16_t incoming_buffer[INCOMING_BUFFER_SIZE * AUDIO_CHANNELS]; // Incoming data buffer
+volatile int16_t incoming_buffer[INCOMING_BUFFER_SIZE * AUDIO_CHANNELS]; // Incoming data buffer
 volatile uint32_t incoming_w_ptr = 0; // Incoming write pointer
 volatile uint32_t incoming_r_ptr = 0; // Incoming read pointer
 volatile int16_t last_L = 0; // Last left sample
@@ -117,7 +117,6 @@ int main(void)
     /* USER CODE BEGIN 2 */
 
     cs43l22_init();
-    cs43l22_set_volume(175);
     memset(buffer_audio, 0, sizeof(buffer_audio));
     memset(incoming_buffer, 0, sizeof(incoming_buffer));
     cs43l22_play(buffer_audio, AUDIO_BUFFER_SIZE * AUDIO_CHANNELS);
@@ -394,8 +393,22 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
 
+    // Validate input length
+    if (*Len < 4) {
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+        return;
+    }
+    
+    // Truncate to multiple of 4 bytes (stereo frame size)
+    *Len &= ~3U;
+    uint32_t frames = *Len / 4;
+
+    if (frames == 0) {
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+        return;
+    }
+
     last_data_time = HAL_GetTick();
-    uint32_t frames = *Len / (2 * AUDIO_CHANNELS); // 4 bytes per stereo frame
 
     // Calculate available space in circular buffer
     uint32_t available;
@@ -412,10 +425,7 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
     for (uint32_t i = 0; i < frames; i++) {
         incoming_buffer[incoming_w_ptr * AUDIO_CHANNELS] = (int16_t)(Buf[i * 4 + 0] | (Buf[i * 4 + 1] << 8));
         incoming_buffer[incoming_w_ptr * AUDIO_CHANNELS + 1] = (int16_t)(Buf[i * 4 + 2] | (Buf[i * 4 + 3] << 8));
-        incoming_w_ptr++;
-        if (incoming_w_ptr == INCOMING_BUFFER_SIZE) {
-            incoming_w_ptr = 0;
-        }
+        incoming_w_ptr = (incoming_w_ptr + 1) % INCOMING_BUFFER_SIZE;
     }
 
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
@@ -431,10 +441,7 @@ void AUDIO_I2S_TxHalfCpltCallback(void)
             last_R = incoming_buffer[incoming_r_ptr * AUDIO_CHANNELS + 1];
             buffer_audio[i * AUDIO_CHANNELS] = last_L;
             buffer_audio[i * AUDIO_CHANNELS + 1] = last_R;
-            incoming_r_ptr++;
-            if (incoming_r_ptr == INCOMING_BUFFER_SIZE) {
-                incoming_r_ptr = 0;
-            }
+            incoming_r_ptr = (incoming_r_ptr + 1) % INCOMING_BUFFER_SIZE;
         } else {
             // No data, repeat last sample to avoid clicks
             buffer_audio[i * AUDIO_CHANNELS] = last_L;
@@ -456,10 +463,7 @@ void AUDIO_I2S_TxCpltCallback(void)
             last_R = incoming_buffer[incoming_r_ptr * AUDIO_CHANNELS + 1];
             buffer_audio[(start_idx + i) * AUDIO_CHANNELS] = last_L;
             buffer_audio[(start_idx + i) * AUDIO_CHANNELS + 1] = last_R;
-            incoming_r_ptr++;
-            if (incoming_r_ptr == INCOMING_BUFFER_SIZE) {
-                incoming_r_ptr = 0;
-            }
+            incoming_r_ptr = (incoming_r_ptr + 1) % INCOMING_BUFFER_SIZE;
         } else {
             // No data, repeat last sample to avoid clicks
             buffer_audio[(start_idx + i) * AUDIO_CHANNELS] = last_L;
