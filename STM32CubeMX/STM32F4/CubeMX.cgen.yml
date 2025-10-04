@@ -1,0 +1,54 @@
+generator-import:
+  for-device: STMicroelectronics::STM32F407VGTx
+  for-board: STM32F407G-DISC1
+  define:
+    - USE_HAL_DRIVER
+    - STM32F407xx
+  add-path:
+    - ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Inc
+    - ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
+    - ./STM32CubeMX/Middlewares/ST/STM32_USB_Device_Library/Core/Inc
+    - ./STM32CubeMX/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
+    - ./STM32CubeMX/Drivers/CMSIS/Device/ST/STM32F4xx/Include
+    - ./STM32CubeMX/Inc
+    - ./MX_Device
+  groups:
+    - group: CubeMX
+      files:
+        - file: ./STM32CubeMX/Src/main.c
+        - file: ./STM32CubeMX/Src/cs43l22.c
+        - file: ./STM32CubeMX/Src/usb_device.c
+        - file: ./STM32CubeMX/Src/usbd_conf.c
+        - file: ./STM32CubeMX/Src/usbd_desc.c
+        - file: ./STM32CubeMX/Src/usbd_cdc_if.c
+        - file: ./STM32CubeMX/Src/stm32f4xx_it.c
+        - file: ./STM32CubeMX/Src/stm32f4xx_hal_msp.c
+        - file: ./STM32CubeMX/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c
+        - file: ./STM32CubeMX/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
+        - file: ./STM32CubeMX/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c
+        - file: ./STM32CubeMX/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
+        - file: ./STM32CubeMX/MDK-ARM/startup_stm32f407xx.s
+        - file: ./STM32CubeMX/Src/system_stm32f4xx.c
+    - group: STM32 HAL Driver
+      files:
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd_ex.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_usb.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ex.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ramfunc.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma_ex.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr_ex.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_exti.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c_ex.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2s.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2s_ex.c
+        - file: ./STM32CubeMX/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spi.c

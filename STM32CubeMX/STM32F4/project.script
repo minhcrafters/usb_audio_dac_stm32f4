@@ -1,0 +1,5 @@
+loadboard STM32F407G-DISC1 allmodes
+project name STM32CubeMX
+project toolchain "MDK-ARM V5"
+project path "D:\coding\STM32\waveforms_dac\STM32CubeMX\STM32F4"
+SetCopyLibrary "copy only"
