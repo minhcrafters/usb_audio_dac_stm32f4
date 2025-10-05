@@ -198,7 +198,7 @@ impl AudioPlayer {
     }
 }
 
-struct AudioQueueApp {
+struct App {
     player: Arc<Mutex<AudioPlayer>>,
     available_ports: Vec<String>,
     selected_port: String,
@@ -206,7 +206,7 @@ struct AudioQueueApp {
     playback_thread: Option<thread::JoinHandle<()>>,
 }
 
-impl Default for AudioQueueApp {
+impl Default for App {
     fn default() -> Self {
         let ports = serialport::available_ports()
             .unwrap_or_default()
@@ -236,7 +236,7 @@ fn format_duration(seconds: f32) -> String {
     }
 }
 
-impl eframe::App for AudioQueueApp {
+impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -385,6 +385,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "USB audio player",
         options,
-        Box::new(|_cc| Ok(Box::new(AudioQueueApp::default()))),
+        Box::new(|_cc| Ok(Box::new(App::default()))),
     )
 }
