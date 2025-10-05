@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "stm32f4xx_hal.h"
 #include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -128,6 +129,10 @@ int main(void)
         /* USER CODE END WHILE */
 
         /* USER CODE BEGIN 3 */
+        // if (HAL_GetTick() - last_data_time > BUFFER_TIMEOUT_MS) {
+        //     memset((void*)buffer_audio, 0, sizeof(buffer_audio));
+        //     memset((void*)incoming_buffer, 0, sizeof(incoming_buffer));
+        // }
     }
     /* USER CODE END 3 */
 }
@@ -452,7 +457,7 @@ void AUDIO_I2S_TxHalfCpltCallback(void)
 
 void AUDIO_I2S_TxCpltCallback(void)
 {
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET);
     // Refill second half of buffer
     uint32_t frames_to_copy = AUDIO_BUFFER_HALF_SIZE;
     uint32_t start_idx = AUDIO_BUFFER_HALF_SIZE;
@@ -469,7 +474,7 @@ void AUDIO_I2S_TxCpltCallback(void)
             buffer_audio[(start_idx + i) * AUDIO_CHANNELS + 1] = last_R;
         }
     }
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_RESET);
 }
 /* USER CODE END 4 */
 
@@ -483,6 +488,10 @@ void Error_Handler(void)
     /* User can add his own implementation to report the HAL error return state */
     __disable_irq();
     while (1) {
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+        HAL_Delay(1000);
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
+        HAL_Delay(1000);
     }
     /* USER CODE END Error_Handler_Debug */
 }
