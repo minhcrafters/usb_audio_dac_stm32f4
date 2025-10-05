@@ -400,6 +400,7 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
     // Validate input length
     if (*Len < 4) {
         HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
         return;
     }
 
@@ -409,6 +410,7 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
 
     if (frames == 0) {
         HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
         return;
     }
 
@@ -432,6 +434,7 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
         incoming_w_ptr = (incoming_w_ptr + 1) % INCOMING_BUFFER_SIZE;
     }
 
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
 }
 void AUDIO_I2S_TxHalfCpltCallback(void)
