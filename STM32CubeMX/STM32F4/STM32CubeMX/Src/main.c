@@ -33,9 +33,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define AUDIO_BUFFER_SIZE 8192 // Number of stereo frames (L+R) - increased for better buffering
-#define AUDIO_CHANNELS 2 // Stereo
-#define INCOMING_BUFFER_SIZE (AUDIO_BUFFER_SIZE * 2) // Larger incoming buffer
+#define AUDIO_BUFFER_SIZE 8192
+#define AUDIO_BUFFER_HALF_SIZE (AUDIO_BUFFER_SIZE / 2)
+#define INCOMING_BUFFER_SIZE (AUDIO_BUFFER_SIZE * 2)
+#define AUDIO_CHANNELS 2
+#define BUFFER_TIMEOUT_MS 100
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -52,9 +54,6 @@ DMA_HandleTypeDef hdma_spi3_tx;
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
-#define AUDIO_BUFFER_HALF_SIZE (AUDIO_BUFFER_SIZE / 2)
-#define BUFFER_TIMEOUT_MS 100
-
 volatile int16_t buffer_audio[AUDIO_BUFFER_SIZE * AUDIO_CHANNELS]; // Single audio buffer
 volatile uint32_t audio_buffer_w_ptr = 0; // Write pointer
 volatile uint32_t last_data_time = 0; // Last time data was received
@@ -117,9 +116,9 @@ int main(void)
     /* USER CODE BEGIN 2 */
 
     cs43l22_init();
-    memset(buffer_audio, 0, sizeof(buffer_audio));
-    memset(incoming_buffer, 0, sizeof(incoming_buffer));
-    cs43l22_play(buffer_audio, AUDIO_BUFFER_SIZE * AUDIO_CHANNELS);
+    memset((void*)buffer_audio, 0, sizeof(buffer_audio));
+    memset((void*)incoming_buffer, 0, sizeof(incoming_buffer));
+    cs43l22_play((void*)buffer_audio, AUDIO_BUFFER_SIZE * AUDIO_CHANNELS);
 
     /* USER CODE END 2 */
 
@@ -398,7 +397,7 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
         HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
         return;
     }
-    
+
     // Truncate to multiple of 4 bytes (stereo frame size)
     *Len &= ~3U;
     uint32_t frames = *Len / 4;
