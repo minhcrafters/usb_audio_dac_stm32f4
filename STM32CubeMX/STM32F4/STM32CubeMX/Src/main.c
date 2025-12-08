@@ -437,6 +437,7 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
 }
+
 void AUDIO_I2S_TxHalfCpltCallback(void)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);

@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 serialport = "4.7"
-clap = { version = "4.5.48", features = ["derive"] }
-eframe = "0.32.3"
-rfd = "0.15.4"
+clap = { version = "4.5", features = ["derive"] }
+eframe = "0.33"
+rfd = "0.16"
+egui_plot = "0.34"
+biquad = "0.5"
+serde = "1.0"
+serde_derive = "1.0"

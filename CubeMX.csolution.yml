@@ -1,6 +1,6 @@
 # A solution is a collection of related projects that share same base configuration.
 solution:
-  created-for: CMSIS-Toolbox@2.9.0
+  created-for: CMSIS-Toolbox@2.12.0
   cdefault:
 
   # List of tested compilers that can be selected
@@ -28,6 +28,10 @@ solution:
     - type: STM32F4
       device: STM32F407VGTx
       board: STM32F407G-DISC1:Rev.C.1
+      target-set:
+        - set:
+          images:
+            - project-context: CubeMX.Release
       # device: STMicroelectronics::STM32F469NIHx
 
       # List of different build configurations.
