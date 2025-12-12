@@ -63,6 +63,7 @@ volatile uint32_t incoming_w_ptr = 0; // Incoming write pointer
 volatile uint32_t incoming_r_ptr = 0; // Incoming read pointer
 volatile int16_t last_L = 0; // Last left sample
 volatile int16_t last_R = 0; // Last right sample
+volatile uint8_t is_paused = 0; // Pause state
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -129,6 +130,16 @@ int main(void)
         /* USER CODE END WHILE */
 
         /* USER CODE BEGIN 3 */
+        if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
+            HAL_Delay(50); // Debounce
+            if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
+                is_paused = !is_paused;
+                // Wait for release
+                while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
+                    HAL_Delay(10);
+                }
+            }
+        }
         // if (HAL_GetTick() - last_data_time > BUFFER_TIMEOUT_MS) {
         //     memset((void*)buffer_audio, 0, sizeof(buffer_audio));
         //     memset((void*)incoming_buffer, 0, sizeof(incoming_buffer));
@@ -441,6 +452,13 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
 void AUDIO_I2S_TxHalfCpltCallback(void)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);
+
+    if (is_paused) {
+        memset((void*)&buffer_audio[0], 0, AUDIO_BUFFER_HALF_SIZE * AUDIO_CHANNELS * sizeof(int16_t));
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET);
+        return;
+    }
+
     // Refill first half of buffer
     uint32_t frames_to_copy = AUDIO_BUFFER_HALF_SIZE;
     for (uint32_t i = 0; i < frames_to_copy; i++) {
@@ -462,6 +480,13 @@ void AUDIO_I2S_TxHalfCpltCallback(void)
 void AUDIO_I2S_TxCpltCallback(void)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET);
+
+    if (is_paused) {
+        memset((void*)&buffer_audio[AUDIO_BUFFER_HALF_SIZE * AUDIO_CHANNELS], 0, AUDIO_BUFFER_HALF_SIZE * AUDIO_CHANNELS * sizeof(int16_t));
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_RESET);
+        return;
+    }
+
     // Refill second half of buffer
     uint32_t frames_to_copy = AUDIO_BUFFER_HALF_SIZE;
     uint32_t start_idx = AUDIO_BUFFER_HALF_SIZE;
