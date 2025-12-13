@@ -1,15 +1,20 @@
 # A project translates into one executable or library.
 project:
+    # List components to use for your application.
+    # A software component is a re-usable unit that may be configurable.
+    components:
+        - component: ARM::CMSIS:CORE
+        - component: Device:CubeMX
 
-  # List components to use for your application.
-  # A software component is a re-usable unit that may be configurable.
-  components:
-    - component: ARM::CMSIS:CORE
-    - component: Device:CubeMX
+    groups:
+        - group: User
+          files:
+              - file: ./STM32CubeMX/STM32F4/STM32CubeMX/Src/cs43l22.c
+              - file: ./STM32CubeMX/STM32F4/STM32CubeMX/Src/led_pwm.c
 
-  # List executable file formats to be generated.
-  output:
-    type:
-      - elf
-      - hex
-      - map
+    # List executable file formats to be generated.
+    output:
+        type:
+            - elf
+            - hex
+            - map

@@ -18,13 +18,12 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stm32f4xx_hal.h"
 #include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "cs43l22.h"
-#include <stdint.h>
+#include "led_pwm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,11 +33,27 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define AUDIO_BUFFER_SIZE 8192
+#define AUDIO_BUFFER_SIZE 4096
 #define AUDIO_BUFFER_HALF_SIZE (AUDIO_BUFFER_SIZE / 2)
 #define INCOMING_BUFFER_SIZE (AUDIO_BUFFER_SIZE * 2)
 #define AUDIO_CHANNELS 2
 #define BUFFER_TIMEOUT_MS 100
+
+#define ENABLE_REVERB
+
+#ifdef ENABLE_REVERB
+#define REVERB_DRY_LEVEL 256
+#define REVERB_WET_LEVEL 128
+#define REVERB_DECAY 215
+#define REVERB_DAMPING 51
+#define REVERB_PREDELAY_MS 30
+#define REVERB_DIFFUSION 128
+#define REVERB_STEREO_SPREAD 23
+
+#define MAX_COMB_SIZE 1600
+#define MAX_AP_SIZE 600
+#define MAX_PREDELAY 2400
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,12 +62,16 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 I2C_HandleTypeDef hi2c1;
 
 I2S_HandleTypeDef hi2s3;
 DMA_HandleTypeDef hdma_spi3_tx;
 
 SPI_HandleTypeDef hspi1;
+
+TIM_HandleTypeDef htim4;
 
 /* USER CODE BEGIN PV */
 volatile int16_t buffer_audio[AUDIO_BUFFER_SIZE * AUDIO_CHANNELS]; // Single audio buffer
@@ -63,7 +82,35 @@ volatile uint32_t incoming_w_ptr = 0; // Incoming write pointer
 volatile uint32_t incoming_r_ptr = 0; // Incoming read pointer
 volatile int16_t last_L = 0; // Last left sample
 volatile int16_t last_R = 0; // Last right sample
-volatile uint8_t is_paused = 0; // Pause state
+// volatile uint8_t is_paused = 0; // Pause state
+
+#ifdef ENABLE_REVERB
+// Buffers
+int16_t comb_L[4][MAX_COMB_SIZE];
+int16_t comb_R[4][MAX_COMB_SIZE];
+int16_t ap_L[2][MAX_AP_SIZE];
+int16_t ap_R[2][MAX_AP_SIZE];
+int16_t predelay_buf_L[MAX_PREDELAY];
+int16_t predelay_buf_R[MAX_PREDELAY];
+
+// Indices
+uint16_t comb_idx_L[4] = { 0 };
+uint16_t comb_idx_R[4] = { 0 };
+uint16_t ap_idx_L[2] = { 0 };
+uint16_t ap_idx_R[2] = { 0 };
+uint16_t pre_idx = 0;
+
+// Filter States
+int16_t comb_damp_L[4] = { 0 };
+int16_t comb_damp_R[4] = { 0 };
+
+// Tunings
+const uint16_t comb_lens[4] = { 1116, 1188, 1277, 1356 };
+const uint16_t ap_lens[2] = { 556, 441 };
+
+volatile uint16_t reverb_dry_level = REVERB_DRY_LEVEL;
+volatile uint16_t reverb_wet_level = REVERB_WET_LEVEL;
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,7 +120,11 @@ static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2S3_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_ADC1_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
+void ApplyDSP(int16_t in_L, int16_t in_R, int16_t* out_L, int16_t* out_R);
+void ProcessAudioChunk(int16_t* output_buffer, uint32_t count);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -115,11 +166,28 @@ int main(void)
     MX_I2S3_Init();
     MX_SPI1_Init();
     MX_USB_DEVICE_Init();
+    MX_ADC1_Init();
+    MX_TIM4_Init();
     /* USER CODE BEGIN 2 */
+    LED_PWM_Init(&htim4);
+
+#ifdef ENABLE_REVERB
+    HAL_ADC_Init(&hadc1);
+#endif
 
     cs43l22_init();
+
     memset((void*)buffer_audio, 0, sizeof(buffer_audio));
     memset((void*)incoming_buffer, 0, sizeof(incoming_buffer));
+#ifdef ENABLE_REVERB
+    memset((void*)comb_L, 0, sizeof(comb_L));
+    memset((void*)comb_R, 0, sizeof(comb_R));
+    memset((void*)ap_L, 0, sizeof(ap_L));
+    memset((void*)ap_R, 0, sizeof(ap_R));
+    memset((void*)predelay_buf_L, 0, sizeof(predelay_buf_L));
+    memset((void*)predelay_buf_R, 0, sizeof(predelay_buf_R));
+#endif
+
     cs43l22_play((void*)buffer_audio, AUDIO_BUFFER_SIZE * AUDIO_CHANNELS);
 
     /* USER CODE END 2 */
@@ -130,20 +198,37 @@ int main(void)
         /* USER CODE END WHILE */
 
         /* USER CODE BEGIN 3 */
-        if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
-            HAL_Delay(50); // Debounce
-            if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
-                is_paused = !is_paused;
-                // Wait for release
-                while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
-                    HAL_Delay(10);
-                }
-            }
-        }
+        // if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
+        //     HAL_Delay(50); // Debounce
+        //     if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
+        //         is_paused = !is_paused;
+        //         // Wait for release
+        //         while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET) {
+        //             HAL_Delay(10);
+        //         }
+        //     }
+        // }
         // if (HAL_GetTick() - last_data_time > BUFFER_TIMEOUT_MS) {
         //     memset((void*)buffer_audio, 0, sizeof(buffer_audio));
         //     memset((void*)incoming_buffer, 0, sizeof(incoming_buffer));
         // }
+
+#ifdef ENABLE_REVERB
+        HAL_ADC_Start(&hadc1);
+
+        HAL_ADC_PollForConversion(&hadc1, 10);
+        uint16_t wet_level = HAL_ADC_GetValue(&hadc1);
+
+        HAL_ADC_PollForConversion(&hadc1, 10);
+        uint16_t dry_level = HAL_ADC_GetValue(&hadc1);
+
+        HAL_ADC_Stop(&hadc1);
+
+        reverb_wet_level = (wet_level * 256) / 4095;
+        LED_PWM_SetBrightness(LED_ORANGE, (wet_level * 100) / 4095);
+        reverb_dry_level = (dry_level * 256) / 4095;
+        LED_PWM_SetBrightness(LED_BLUE, (dry_level * 100) / 4095);
+#endif
     }
     /* USER CODE END 3 */
 }
@@ -189,6 +274,63 @@ void SystemClock_Config(void)
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK) {
         Error_Handler();
     }
+}
+
+/**
+ * @brief ADC1 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_ADC1_Init(void)
+{
+
+    /* USER CODE BEGIN ADC1_Init 0 */
+
+    /* USER CODE END ADC1_Init 0 */
+
+    ADC_ChannelConfTypeDef sConfig = { 0 };
+
+    /* USER CODE BEGIN ADC1_Init 1 */
+
+    /* USER CODE END ADC1_Init 1 */
+
+    /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+     */
+    hadc1.Instance = ADC1;
+    hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+    hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+    hadc1.Init.ScanConvMode = ENABLE;
+    hadc1.Init.ContinuousConvMode = DISABLE;
+    hadc1.Init.DiscontinuousConvMode = DISABLE;
+    hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+    hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+    hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+    hadc1.Init.NbrOfConversion = 2;
+    hadc1.Init.DMAContinuousRequests = DISABLE;
+    hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+    if (HAL_ADC_Init(&hadc1) != HAL_OK) {
+        Error_Handler();
+    }
+
+    /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+     */
+    sConfig.Channel = ADC_CHANNEL_1;
+    sConfig.Rank = 1;
+    sConfig.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) {
+        Error_Handler();
+    }
+
+    /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+     */
+    sConfig.Channel = ADC_CHANNEL_2;
+    sConfig.Rank = 2;
+    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) {
+        Error_Handler();
+    }
+    /* USER CODE BEGIN ADC1_Init 2 */
+
+    /* USER CODE END ADC1_Init 2 */
 }
 
 /**
@@ -292,6 +434,60 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+ * @brief TIM4 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_TIM4_Init(void)
+{
+
+    /* USER CODE BEGIN TIM4_Init 0 */
+
+    /* USER CODE END TIM4_Init 0 */
+
+    TIM_MasterConfigTypeDef sMasterConfig = { 0 };
+    TIM_OC_InitTypeDef sConfigOC = { 0 };
+
+    /* USER CODE BEGIN TIM4_Init 1 */
+
+    /* USER CODE END TIM4_Init 1 */
+    htim4.Instance = TIM4;
+    htim4.Init.Prescaler = 0;
+    htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim4.Init.Period = 65535;
+    htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    if (HAL_TIM_PWM_Init(&htim4) != HAL_OK) {
+        Error_Handler();
+    }
+    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK) {
+        Error_Handler();
+    }
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK) {
+        Error_Handler();
+    }
+    if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_2) != HAL_OK) {
+        Error_Handler();
+    }
+    if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK) {
+        Error_Handler();
+    }
+    if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK) {
+        Error_Handler();
+    }
+    /* USER CODE BEGIN TIM4_Init 2 */
+
+    /* USER CODE END TIM4_Init 2 */
+    HAL_TIM_MspPostInit(&htim4);
+}
+
+/**
  * Enable DMA controller clock
  */
 static void MX_DMA_Init(void)
@@ -333,7 +529,7 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_WritePin(OTG_FS_PowerSwitchOn_GPIO_Port, OTG_FS_PowerSwitchOn_Pin, GPIO_PIN_SET);
 
     /*Configure GPIO pin Output Level */
-    HAL_GPIO_WritePin(GPIOD, LD4_Pin | LD3_Pin | LD5_Pin | LD6_Pin | Audio_RST_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(Audio_RST_GPIO_Port, Audio_RST_Pin, GPIO_PIN_RESET);
 
     /*Configure GPIO pin : CS_I2C_SPI_Pin */
     GPIO_InitStruct.Pin = CS_I2C_SPI_Pin;
@@ -377,14 +573,12 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Alternate = GPIO_AF5_SPI2;
     HAL_GPIO_Init(CLK_IN_GPIO_Port, &GPIO_InitStruct);
 
-    /*Configure GPIO pins : LD4_Pin LD3_Pin LD5_Pin LD6_Pin
-                             Audio_RST_Pin */
-    GPIO_InitStruct.Pin = LD4_Pin | LD3_Pin | LD5_Pin | LD6_Pin
-        | Audio_RST_Pin;
+    /*Configure GPIO pin : Audio_RST_Pin */
+    GPIO_InitStruct.Pin = Audio_RST_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    HAL_GPIO_Init(Audio_RST_GPIO_Port, &GPIO_InitStruct);
 
     /*Configure GPIO pin : OTG_FS_OverCurrent_Pin */
     GPIO_InitStruct.Pin = OTG_FS_OverCurrent_Pin;
@@ -404,13 +598,134 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+#ifdef ENABLE_REVERB
+int16_t CombProcess(int16_t input, int16_t* buffer, uint16_t* idx, uint16_t size, int16_t* damp_state)
+{
+    int16_t output = buffer[*idx];
+
+    // Damping (Lowpass on feedback)
+    *damp_state = ((int32_t)output * (256 - REVERB_DAMPING) + (int32_t)(*damp_state) * REVERB_DAMPING) >> 8;
+
+    int32_t feedback = input + ((*damp_state * REVERB_DECAY) >> 8);
+
+    // Clip
+    if (feedback > 32767)
+        feedback = 32767;
+    if (feedback < -32768)
+        feedback = -32768;
+
+    buffer[*idx] = (int16_t)feedback;
+
+    (*idx)++;
+    if (*idx >= size)
+        *idx = 0;
+
+    return output;
+}
+
+int16_t AllpassProcess(int16_t input, int16_t* buffer, uint16_t* idx, uint16_t size)
+{
+    int16_t buf_out = buffer[*idx];
+
+    int32_t feedback = input + ((buf_out * REVERB_DIFFUSION) >> 8);
+
+    // Clip
+    if (feedback > 32767)
+        feedback = 32767;
+    if (feedback < -32768)
+        feedback = -32768;
+
+    buffer[*idx] = (int16_t)feedback;
+
+    int32_t output = buf_out - ((feedback * REVERB_DIFFUSION) >> 8);
+
+    // Clip
+    if (output > 32767)
+        output = 32767;
+    if (output < -32768)
+        output = -32768;
+
+    (*idx)++;
+    if (*idx >= size)
+        *idx = 0;
+
+    return (int16_t)output;
+}
+#endif
+
+void ApplyDSP(int16_t in_L, int16_t in_R, int16_t* out_L, int16_t* out_R)
+{
+#ifdef ENABLE_REVERB
+    predelay_buf_L[pre_idx] = in_L;
+    predelay_buf_R[pre_idx] = in_R;
+
+    // Calculate read index for predelay
+    uint16_t pre_read_idx = pre_idx; // 0ms
+    uint16_t delay_samples = REVERB_PREDELAY_MS * 48; // 48 samples per ms
+    if (delay_samples > MAX_PREDELAY)
+        delay_samples = MAX_PREDELAY;
+
+    if (pre_idx >= delay_samples)
+        pre_read_idx = pre_idx - delay_samples;
+    else
+        pre_read_idx = MAX_PREDELAY - (delay_samples - pre_idx);
+
+    int16_t dry_L = in_L;
+    int16_t dry_R = in_R;
+
+    int16_t wet_in_L = predelay_buf_L[pre_read_idx];
+    int16_t wet_in_R = predelay_buf_R[pre_read_idx];
+
+    pre_idx++;
+    if (pre_idx >= MAX_PREDELAY)
+        pre_idx = 0;
+
+    int32_t accum_L = 0;
+    int32_t accum_R = 0;
+
+    for (int i = 0; i < 4; i++) {
+        accum_L += CombProcess(wet_in_L, comb_L[i], &comb_idx_L[i], comb_lens[i], &comb_damp_L[i]);
+        accum_R += CombProcess(wet_in_R, comb_R[i], &comb_idx_R[i], comb_lens[i] + REVERB_STEREO_SPREAD, &comb_damp_R[i]);
+    }
+
+    // Scale down accumulator to prevent massive clipping
+    accum_L /= 4;
+    accum_R /= 4;
+
+    int16_t ap_out_L = (int16_t)accum_L;
+    int16_t ap_out_R = (int16_t)accum_R;
+
+    for (int i = 0; i < 2; i++) {
+        ap_out_L = AllpassProcess(ap_out_L, ap_L[i], &ap_idx_L[i], ap_lens[i]);
+        ap_out_R = AllpassProcess(ap_out_R, ap_R[i], &ap_idx_R[i], ap_lens[i] + REVERB_STEREO_SPREAD);
+    }
+
+    int32_t final_L = ((dry_L * reverb_dry_level) >> 8) + ((ap_out_L * reverb_wet_level) >> 8);
+    int32_t final_R = ((dry_R * reverb_dry_level) >> 8) + ((ap_out_R * reverb_wet_level) >> 8);
+
+    if (final_L > 32767)
+        final_L = 32767;
+    if (final_L < -32768)
+        final_L = -32768;
+    if (final_R > 32767)
+        final_R = 32767;
+    if (final_R < -32768)
+        final_R = -32768;
+
+    *out_L = (int16_t)final_L;
+    *out_R = (int16_t)final_R;
+#else
+    *out_L = in_L;
+    *out_R = in_R;
+#endif
+}
+
 void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
 
     // Validate input length
     if (*Len < 4) {
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
         return;
     }
@@ -420,7 +735,6 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
     uint32_t frames = *Len / 4;
 
     if (frames == 0) {
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
         return;
     }
@@ -446,64 +760,50 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
     }
 
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+}
+
+void ProcessAudioChunk(int16_t* output_buffer, uint32_t count)
+{
+    // if (is_paused) {
+    //     memset((void*)output_buffer, 0, count * AUDIO_CHANNELS * sizeof(int16_t));
+    //     return;
+    // }
+
+    // Green
+    HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+
+    for (uint32_t i = 0; i < count; i++) {
+        int16_t in_L, in_R;
+        if (incoming_r_ptr != incoming_w_ptr) {
+            // Data available
+            in_L = incoming_buffer[incoming_r_ptr * AUDIO_CHANNELS];
+            in_R = incoming_buffer[incoming_r_ptr * AUDIO_CHANNELS + 1];
+            incoming_r_ptr = (incoming_r_ptr + 1) % INCOMING_BUFFER_SIZE;
+        } else {
+            // No data, feed silence
+            in_L = 0;
+            in_R = 0;
+        }
+
+        int16_t out_L, out_R;
+        ApplyDSP(in_L, in_R, &out_L, &out_R);
+
+        last_L = out_L;
+        last_R = out_R;
+
+        output_buffer[i * AUDIO_CHANNELS] = out_L;
+        output_buffer[i * AUDIO_CHANNELS + 1] = out_R;
+    }
 }
 
 void AUDIO_I2S_TxHalfCpltCallback(void)
 {
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);
-
-    if (is_paused) {
-        memset((void*)&buffer_audio[0], 0, AUDIO_BUFFER_HALF_SIZE * AUDIO_CHANNELS * sizeof(int16_t));
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET);
-        return;
-    }
-
-    // Refill first half of buffer
-    uint32_t frames_to_copy = AUDIO_BUFFER_HALF_SIZE;
-    for (uint32_t i = 0; i < frames_to_copy; i++) {
-        if (incoming_r_ptr != incoming_w_ptr) { // Data available
-            last_L = incoming_buffer[incoming_r_ptr * AUDIO_CHANNELS];
-            last_R = incoming_buffer[incoming_r_ptr * AUDIO_CHANNELS + 1];
-            buffer_audio[i * AUDIO_CHANNELS] = last_L;
-            buffer_audio[i * AUDIO_CHANNELS + 1] = last_R;
-            incoming_r_ptr = (incoming_r_ptr + 1) % INCOMING_BUFFER_SIZE;
-        } else {
-            // No data, repeat last sample to avoid clicks
-            buffer_audio[i * AUDIO_CHANNELS] = last_L;
-            buffer_audio[i * AUDIO_CHANNELS + 1] = last_R;
-        }
-    }
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET);
+    ProcessAudioChunk((int16_t*)&buffer_audio[0], AUDIO_BUFFER_HALF_SIZE);
 }
 
 void AUDIO_I2S_TxCpltCallback(void)
 {
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET);
-
-    if (is_paused) {
-        memset((void*)&buffer_audio[AUDIO_BUFFER_HALF_SIZE * AUDIO_CHANNELS], 0, AUDIO_BUFFER_HALF_SIZE * AUDIO_CHANNELS * sizeof(int16_t));
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_RESET);
-        return;
-    }
-
-    // Refill second half of buffer
-    uint32_t frames_to_copy = AUDIO_BUFFER_HALF_SIZE;
-    uint32_t start_idx = AUDIO_BUFFER_HALF_SIZE;
-    for (uint32_t i = 0; i < frames_to_copy; i++) {
-        if (incoming_r_ptr != incoming_w_ptr) { // Data available
-            last_L = incoming_buffer[incoming_r_ptr * AUDIO_CHANNELS];
-            last_R = incoming_buffer[incoming_r_ptr * AUDIO_CHANNELS + 1];
-            buffer_audio[(start_idx + i) * AUDIO_CHANNELS] = last_L;
-            buffer_audio[(start_idx + i) * AUDIO_CHANNELS + 1] = last_R;
-            incoming_r_ptr = (incoming_r_ptr + 1) % INCOMING_BUFFER_SIZE;
-        } else {
-            // No data, repeat last sample to avoid clicks
-            buffer_audio[(start_idx + i) * AUDIO_CHANNELS] = last_L;
-            buffer_audio[(start_idx + i) * AUDIO_CHANNELS + 1] = last_R;
-        }
-    }
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_RESET);
+    ProcessAudioChunk((int16_t*)&buffer_audio[AUDIO_BUFFER_HALF_SIZE * AUDIO_CHANNELS], AUDIO_BUFFER_HALF_SIZE);
 }
 /* USER CODE END 4 */
 

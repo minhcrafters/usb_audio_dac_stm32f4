@@ -1,218 +1,12 @@
-use biquad::{Biquad, Coefficients, DirectForm1, ToHertz, Type};
 use eframe::egui;
-use egui_plot::{Line, Plot, PlotPoints};
 use rfd::FileDialog;
 use serialport::SerialPort;
 use std::collections::VecDeque;
-use std::f32::consts::PI;
-use std::fs::File;
-use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::io::Write;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum FilterType {
-    Peak,
-    LowShelf,
-    HighShelf,
-    LowPass,
-    HighPass,
-}
-
-impl FilterType {
-    pub fn to_biquad_type(&self, gain: f32) -> Type<f32> {
-        match self {
-            FilterType::Peak => Type::PeakingEQ(gain),
-            FilterType::LowShelf => Type::LowShelf(gain),
-            FilterType::HighShelf => Type::HighShelf(gain),
-            FilterType::LowPass => Type::LowPass,
-            FilterType::HighPass => Type::HighPass,
-        }
-    }
-
-    pub fn from_apo_string(s: &str) -> Option<Self> {
-        match s {
-            "PK" => Some(FilterType::Peak),
-            "LS" | "LSC" => Some(FilterType::LowShelf),
-            "HS" | "HSC" => Some(FilterType::HighShelf),
-            "LP" => Some(FilterType::LowPass),
-            "HP" => Some(FilterType::HighPass),
-            _ => None,
-        }
-    }
-
-    pub fn to_apo_string(&self) -> &'static str {
-        match self {
-            FilterType::Peak => "PK",
-            FilterType::LowShelf => "LSC",
-            FilterType::HighShelf => "HSC",
-            FilterType::LowPass => "LP",
-            FilterType::HighPass => "HP",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct EqBand {
-    pub enabled: bool,
-    pub filter_type: FilterType,
-    pub freq: f32,
-    pub gain: f32,
-    pub q: f32,
-}
-
-impl Default for EqBand {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            filter_type: FilterType::Peak,
-            freq: 1000.0,
-            gain: 0.0,
-            q: 1.0,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Equalizer {
-    pub bands: Vec<EqBand>,
-    pub preamp_gain: f32, // in dB
-}
-
-impl Default for Equalizer {
-    fn default() -> Self {
-        Self {
-            bands: Vec::new(),
-            preamp_gain: 0.0,
-        }
-    }
-}
-
-impl Equalizer {
-    pub fn load_from_apo(path: &str) -> io::Result<Self> {
-        let path = Path::new(path);
-        let file = File::open(path)?;
-        let reader = io::BufReader::new(file);
-        let mut eq = Equalizer::default();
-
-        for line in reader.lines() {
-            let line = line?;
-            let line = line.trim();
-            if line.starts_with('#') || line.is_empty() {
-                continue;
-            }
-
-            if line.starts_with("Preamp:") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if let Some(idx) = parts.iter().position(|&x| x == "Preamp:") {
-                    if idx + 1 < parts.len() {
-                        if let Ok(val) = parts[idx + 1].parse::<f32>() {
-                            eq.preamp_gain = val;
-                        }
-                    }
-                }
-            } else if line.starts_with("Filter") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                let mut band = EqBand::default();
-
-                if let Some(idx) = parts.iter().position(|&x| x == "ON" || x == "OFF") {
-                    band.enabled = parts[idx] == "ON";
-                    if idx + 1 < parts.len() {
-                        if let Some(t) = FilterType::from_apo_string(parts[idx + 1]) {
-                            band.filter_type = t;
-                        }
-                    }
-                }
-
-                if let Some(idx) = parts.iter().position(|&x| x == "Fc") {
-                    if idx + 1 < parts.len() {
-                        if let Ok(val) = parts[idx + 1].parse::<f32>() {
-                            band.freq = val;
-                        }
-                    }
-                }
-
-                if let Some(idx) = parts.iter().position(|&x| x == "Gain") {
-                    if idx + 1 < parts.len() {
-                        if let Ok(val) = parts[idx + 1].parse::<f32>() {
-                            band.gain = val;
-                        }
-                    }
-                }
-
-                if let Some(idx) = parts.iter().position(|&x| x == "Q") {
-                    if idx + 1 < parts.len() {
-                        if let Ok(val) = parts[idx + 1].parse::<f32>() {
-                            band.q = val;
-                        }
-                    }
-                }
-
-                eq.bands.push(band);
-            }
-        }
-        Ok(eq)
-    }
-
-    pub fn save_to_apo(&self, path: &str) -> io::Result<()> {
-        let mut file = File::create(path)?;
-        writeln!(file, "Preamp: {} dB", self.preamp_gain)?;
-        for (i, band) in self.bands.iter().enumerate() {
-            let status = if band.enabled { "ON" } else { "OFF" };
-            writeln!(
-                file,
-                "Filter {}: {} {} Fc {} Hz Gain {} dB Q {}",
-                i + 1,
-                status,
-                band.filter_type.to_apo_string(),
-                band.freq,
-                band.gain,
-                band.q
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn evaluate_response(&self, freq: f32, sample_rate: f32) -> f32 {
-        let mut total_db = self.preamp_gain;
-        let omega = 2.0 * PI * freq / sample_rate;
-        let cos_w = omega.cos();
-        let sin_w = omega.sin();
-        let cos_2w = (2.0 * omega).cos();
-        let sin_2w = (2.0 * omega).sin();
-
-        for band in &self.bands {
-            if !band.enabled {
-                continue;
-            }
-
-            if let Ok(coeffs) = Coefficients::<f32>::from_params(
-                band.filter_type.to_biquad_type(band.gain),
-                sample_rate.hz(),
-                band.freq.hz(),
-                band.q,
-            ) {
-                let b0 = coeffs.b0;
-                let b1 = coeffs.b1;
-                let b2 = coeffs.b2;
-                let a1 = coeffs.a1;
-                let a2 = coeffs.a2;
-
-                let num_r = b0 + b1 * cos_w + b2 * cos_2w;
-                let num_i = -(b1 * sin_w + b2 * sin_2w);
-                let den_r = 1.0 + a1 * cos_w + a2 * cos_2w;
-                let den_i = -(a1 * sin_w + a2 * sin_2w);
-
-                let mag_sq = (num_r * num_r + num_i * num_i) / (den_r * den_r + den_i * den_i);
-                total_db += 10.0 * mag_sq.log10();
-            }
-        }
-        total_db
-    }
-}
 
 #[derive(Clone)]
 struct AudioFile {
@@ -229,7 +23,6 @@ struct AudioPlayer {
     progress: f32,
     total_duration: f32,
     current_duration: f32,
-    equalizer: Equalizer,
 }
 
 impl Default for AudioPlayer {
@@ -243,7 +36,6 @@ impl Default for AudioPlayer {
             progress: 0.0,
             total_duration: 0.0,
             current_duration: 0.0,
-            equalizer: Equalizer::default(),
         }
     }
 }
@@ -326,32 +118,9 @@ impl AudioPlayer {
         let total_samples = data.len() / 4;
         let total_duration = total_samples as f32 / 46875.0;
 
-        // Initialize EQ filters
-        let mut filters_l: Vec<DirectForm1<f32>> = Vec::new();
-        let mut filters_r: Vec<DirectForm1<f32>> = Vec::new();
-        let mut active_eq = {
-            let p = player.lock().unwrap();
-            p.equalizer.clone()
-        };
-
-        let mut preamp_gain_linear = 10.0f32.powf(active_eq.preamp_gain / 20.0);
-
         {
             let mut p = player.lock().unwrap();
             p.total_duration = total_duration;
-            for band in &active_eq.bands {
-                if band.enabled {
-                    if let Ok(coeffs) = Coefficients::<f32>::from_params(
-                        band.filter_type.to_biquad_type(band.gain),
-                        46875.hz(),
-                        band.freq.hz(),
-                        band.q,
-                    ) {
-                        filters_l.push(DirectForm1::<f32>::new(coeffs));
-                        filters_r.push(DirectForm1::<f32>::new(coeffs));
-                    }
-                }
-            }
         }
 
         {
@@ -378,34 +147,6 @@ impl AudioPlayer {
                 }
             }
 
-            // Check for EQ changes
-            let current_eq = {
-                let p = player.lock().unwrap();
-                p.equalizer.clone()
-            };
-
-            if current_eq != active_eq {
-                active_eq = current_eq;
-                preamp_gain_linear = 10.0f32.powf(active_eq.preamp_gain / 20.0);
-
-                // Rebuild filters
-                filters_l.clear();
-                filters_r.clear();
-                for band in &active_eq.bands {
-                    if band.enabled {
-                        if let Ok(coeffs) = Coefficients::<f32>::from_params(
-                            band.filter_type.to_biquad_type(band.gain),
-                            46875.hz(),
-                            band.freq.hz(),
-                            band.q,
-                        ) {
-                            filters_l.push(DirectForm1::<f32>::new(coeffs));
-                            filters_r.push(DirectForm1::<f32>::new(coeffs));
-                        }
-                    }
-                }
-            }
-
             let target_time = current_play_time;
             let elapsed = start_time.elapsed().as_secs_f32();
             if elapsed < target_time {
@@ -421,17 +162,10 @@ impl AudioPlayer {
                 std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut i16, chunk.len() / 2)
             };
 
-            // Apply EQ and Volume
+            // Apply Volume
             for i in (0..samples.len()).step_by(2) {
-                let mut left = samples[i] as f32 * current_volume * preamp_gain_linear;
-                let mut right = samples[i + 1] as f32 * current_volume * preamp_gain_linear;
-
-                for filter in &mut filters_l {
-                    left = filter.run(left);
-                }
-                for filter in &mut filters_r {
-                    right = filter.run(right);
-                }
+                let left = samples[i] as f32 * current_volume;
+                let right = samples[i + 1] as f32 * current_volume;
 
                 samples[i] = left.clamp(-32768.0, 32767.0) as i16;
                 samples[i + 1] = right.clamp(-32768.0, 32767.0) as i16;
@@ -631,162 +365,6 @@ impl eframe::App for App {
             });
 
             ui.separator();
-            ui.collapsing("Equalizer", |ui| {
-                let mut load_path = None;
-                let mut save_path = None;
-
-                ui.horizontal(|ui| {
-                    if ui.button("Load Config").clicked() {
-                        if let Some(path) =
-                            FileDialog::new().add_filter("Text", &["txt"]).pick_file()
-                        {
-                            load_path = Some(path.to_string_lossy().to_string());
-                        }
-                    }
-                    if ui.button("Save Config").clicked() {
-                        if let Some(path) =
-                            FileDialog::new().add_filter("Text", &["txt"]).save_file()
-                        {
-                            save_path = Some(path.to_string_lossy().to_string());
-                        }
-                    }
-                    if ui.button("Add Band").clicked() {
-                        if let Ok(mut player) = self.player.lock() {
-                            player.equalizer.bands.push(EqBand::default());
-                        }
-                    }
-                });
-
-                if let Some(path) = load_path {
-                    if let Ok(eq) = Equalizer::load_from_apo(&path) {
-                        if let Ok(mut player) = self.player.lock() {
-                            player.equalizer = eq;
-                        }
-                    }
-                }
-
-                if let Some(path) = save_path {
-                    if let Ok(player) = self.player.lock() {
-                        let _ = player.equalizer.save_to_apo(&path);
-                    }
-                }
-
-                // Plot
-                let points = if let Ok(player) = self.player.lock() {
-                    (0..=200)
-                        .map(|i| {
-                            let x = i as f32;
-                            // Logarithmic scale 20Hz to 20kHz
-                            // log10(20) = 1.301
-                            // log10(20000) = 4.301
-                            // range = 3.0
-                            let log_f = 1.301 + (x / 200.0) * 3.0;
-                            let f = 10.0f32.powf(log_f);
-                            let db = player.equalizer.evaluate_response(f, 46875.0);
-                            [log_f as f64, db as f64]
-                        })
-                        .collect::<PlotPoints>()
-                } else {
-                    PlotPoints::default()
-                };
-
-                Plot::new("eq_plot")
-                    .view_aspect(3.0)
-                    .x_axis_label("Frequency (Hz)")
-                    .y_axis_label("Gain (dB)")
-                    .x_axis_formatter(|x, _range| {
-                        let f = 10.0f64.powf(x.value);
-                        if f >= 1000.0 {
-                            format!("{:.0}k", f / 1000.0)
-                        } else {
-                            format!("{:.0}", f)
-                        }
-                    })
-                    .include_x(1.301)
-                    .include_x(4.301)
-                    .include_y(-20.0)
-                    .include_y(20.0)
-                    .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("Response", points));
-                    });
-
-                // Controls
-                if let Ok(mut player) = self.player.lock() {
-                    ui.horizontal(|ui| {
-                        ui.label("Preamp (dB):");
-                        ui.add(egui::DragValue::new(&mut player.equalizer.preamp_gain).speed(0.1));
-                    });
-
-                    let mut to_remove = None;
-                    egui::ScrollArea::vertical()
-                        .max_height(200.0)
-                        .show(ui, |ui| {
-                            for (i, band) in player.equalizer.bands.iter_mut().enumerate() {
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut band.enabled, format!("#{}", i + 1));
-
-                                    egui::ComboBox::from_id_salt(format!("type_{}", i))
-                                        .selected_text(format!("{:?}", band.filter_type))
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(
-                                                &mut band.filter_type,
-                                                FilterType::Peak,
-                                                "Peak (PK)",
-                                            );
-                                            ui.selectable_value(
-                                                &mut band.filter_type,
-                                                FilterType::LowShelf,
-                                                "LowShelf (LSC)",
-                                            );
-                                            ui.selectable_value(
-                                                &mut band.filter_type,
-                                                FilterType::HighShelf,
-                                                "HighShelf (HSC)",
-                                            );
-                                            ui.selectable_value(
-                                                &mut band.filter_type,
-                                                FilterType::LowPass,
-                                                "LowPass (LP)",
-                                            );
-                                            ui.selectable_value(
-                                                &mut band.filter_type,
-                                                FilterType::HighPass,
-                                                "HighPass (HP)",
-                                            );
-                                        });
-
-                                    ui.add(
-                                        egui::DragValue::new(&mut band.freq)
-                                            .speed(10.0)
-                                            .range(20.0..=22000.0)
-                                            .prefix("Fc: ")
-                                            .suffix(" Hz"),
-                                    );
-                                    ui.add(
-                                        egui::DragValue::new(&mut band.gain)
-                                            .speed(0.1)
-                                            .prefix("Gain: ")
-                                            .suffix(" dB"),
-                                    );
-                                    ui.add(
-                                        egui::DragValue::new(&mut band.q)
-                                            .speed(0.01)
-                                            .range(0.1..=100.0)
-                                            .prefix("Q: "),
-                                    );
-
-                                    if ui.button("X").clicked() {
-                                        to_remove = Some(i);
-                                    }
-                                });
-                            }
-                        });
-
-                    if let Some(idx) = to_remove {
-                        player.equalizer.bands.remove(idx);
-                    }
-                }
-            });
 
             if let Ok(player) = self.player.lock() {
                 if player.is_playing {
