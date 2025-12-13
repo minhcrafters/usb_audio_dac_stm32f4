@@ -769,9 +769,6 @@ void ProcessAudioChunk(int16_t* output_buffer, uint32_t count)
     //     return;
     // }
 
-    // Green
-    HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
-
     for (uint32_t i = 0; i < count; i++) {
         int16_t in_L, in_R;
         if (incoming_r_ptr != incoming_w_ptr) {
