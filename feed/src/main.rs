@@ -49,7 +49,7 @@ impl AudioPlayer {
                 "-i",
                 file_path,
                 "-ar",
-                "46875",
+                "48000",
                 "-ac",
                 "2",
                 "-f",
@@ -116,7 +116,7 @@ impl AudioPlayer {
         };
 
         let total_samples = data.len() / 4;
-        let total_duration = total_samples as f32 / 46875.0;
+        let total_duration = total_samples as f32 / 48000.0;
 
         {
             let mut p = player.lock().unwrap();
@@ -135,11 +135,11 @@ impl AudioPlayer {
 
         let chunk_size = 4096;
         let samples_per_chunk = (chunk_size / 4) as f32;
-        let chunk_duration = samples_per_chunk / 46875.0;
+        let chunk_duration = samples_per_chunk / 48000.0;
         let start_time = Instant::now();
         let mut current_play_time = 0.0;
 
-        for (_i, chunk) in data.chunks_mut(chunk_size).enumerate() {
+        for chunk in data.chunks_mut(chunk_size) {
             {
                 let p = player.lock().unwrap();
                 if !p.is_playing {
