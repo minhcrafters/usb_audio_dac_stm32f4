@@ -225,9 +225,9 @@ int main(void)
         HAL_ADC_Stop(&hadc1);
 
         // Exponential volume scaling to fit human perception
-        reverb_wet_level = ((uint32_t)wet_level * wet_level * 256) / (4095 * 4095);
+        reverb_wet_level = ((uint32_t)wet_level * wet_level * 256) / 16769025; // 4095 ^ 2
         LED_PWM_SetBrightness(LED_ORANGE, (wet_level * 100) / 4095);
-        reverb_dry_level = ((uint32_t)dry_level * dry_level * 256) / (4095 * 4095);
+        reverb_dry_level = ((uint32_t)dry_level * dry_level * 256) / 16769025; // 4095 ^ 2
         LED_PWM_SetBrightness(LED_BLUE, (dry_level * 100) / 4095);
 
         HAL_Delay(1);
