@@ -229,8 +229,6 @@ int main(void)
         LED_PWM_SetBrightness(LED_ORANGE, (wet_level * 100) / 4095);
         reverb_dry_level = ((uint32_t)dry_level * dry_level * 256) / 16769025; // 4095 ^ 2
         LED_PWM_SetBrightness(LED_BLUE, (dry_level * 100) / 4095);
-
-        HAL_Delay(1);
 #endif
     }
     /* USER CODE END 3 */
@@ -319,7 +317,7 @@ static void MX_ADC1_Init(void)
      */
     sConfig.Channel = ADC_CHANNEL_1;
     sConfig.Rank = 1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+    sConfig.SamplingTime = ADC_SAMPLETIME_144CYCLES;
     if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) {
         Error_Handler();
     }
@@ -328,6 +326,7 @@ static void MX_ADC1_Init(void)
      */
     sConfig.Channel = ADC_CHANNEL_2;
     sConfig.Rank = 2;
+    sConfig.SamplingTime = ADC_SAMPLETIME_84CYCLES;
     if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) {
         Error_Handler();
     }
