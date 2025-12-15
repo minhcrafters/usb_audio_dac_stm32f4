@@ -44,13 +44,45 @@ impl Default for AudioPlayer {
 }
 
 impl AudioPlayer {
-    fn load_file_raw(&self, file_path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    fn get_duration(file_path: &str) -> Option<f32> {
+        let output = Command::new("ffprobe")
+            .args(&[
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ])
+            .output()
+            .ok()?;
+
+        let duration_str = String::from_utf8_lossy(&output.stdout);
+        duration_str.trim().parse::<f32>().ok()
+    }
+
+    fn play_file(player: Arc<Mutex<AudioPlayer>>, file: AudioFile) {
         use std::io::Read;
 
-        let mut child = Command::new("ffmpeg")
+        {
+            let mut p = player.lock().unwrap();
+            p.current_file = Some(file.clone());
+            p.is_playing = true;
+            p.progress = 0.0;
+            p.current_duration = 0.0;
+            p.total_duration = 0.0;
+        }
+
+        if let Some(duration) = Self::get_duration(&file.path) {
+            let mut p = player.lock().unwrap();
+            p.total_duration = duration;
+        }
+
+        let mut child = match Command::new("ffmpeg")
             .args(&[
                 "-i",
-                file_path,
+                &file.path,
                 "-ar",
                 "48000",
                 "-ac",
@@ -65,66 +97,27 @@ impl AudioPlayer {
                 "pipe:1",
             ])
             .stdout(std::process::Stdio::piped())
-            .spawn()?;
-
-        let mut data = Vec::new();
-        if let Some(mut stdout) = child.stdout.take() {
-            stdout.read_to_end(&mut data)?;
-        }
-
-        let exit_status = child.wait()?;
-        if !exit_status.success() {
-            return Err("ffmpeg conversion failed".into());
-        }
-
-        Ok(data)
-    }
-
-    #[allow(dead_code)]
-    fn load_file(&self, file_path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let mut data = self.load_file_raw(file_path)?;
-
-        let samples = unsafe {
-            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i16, data.len() / 2)
-        };
-        for sample in samples.iter_mut() {
-            *sample = (*sample as f32 * self.volume) as i16;
-        }
-
-        Ok(data)
-    }
-
-    fn play_file(player: Arc<Mutex<AudioPlayer>>, file: AudioFile) {
+            .spawn()
         {
-            let mut p = player.lock().unwrap();
-            p.current_file = Some(file.clone());
-            p.is_playing = true;
-            p.progress = 0.0;
-            p.current_duration = 0.0;
-            p.total_duration = 0.0;
-        }
-
-        let mut data = match {
-            let p = player.lock().unwrap();
-            p.load_file_raw(&file.path)
-        } {
-            Ok(data) => data,
+            Ok(c) => c,
             Err(e) => {
                 let mut p = player.lock().unwrap();
-                p.last_error = Some(format!("Failed to load file {}: {}", file.path, e));
+                p.last_error = Some(format!("Failed to start ffmpeg: {}", e));
                 p.is_playing = false;
                 p.current_file = None;
                 return;
             }
         };
 
-        let total_samples = data.len() / 4;
-        let total_duration = total_samples as f32 / 48000.0;
-
-        {
+        let mut stdout = if let Some(out) = child.stdout.take() {
+            out
+        } else {
             let mut p = player.lock().unwrap();
-            p.total_duration = total_duration;
-        }
+            p.last_error = Some("Failed to open ffmpeg stdout".to_string());
+            p.is_playing = false;
+            p.current_file = None;
+            return;
+        };
 
         {
             let p = player.lock().unwrap();
@@ -132,23 +125,40 @@ impl AudioPlayer {
                 let mut p = player.lock().unwrap();
                 p.is_playing = false;
                 p.current_file = None;
+                let _ = child.kill();
                 return;
             }
         }
 
         let chunk_size = 4096;
-        let samples_per_chunk = (chunk_size / 4) as f32;
-        let chunk_duration = samples_per_chunk / 48000.0;
+        let mut buffer = vec![0u8; chunk_size];
         let start_time = Instant::now();
         let mut current_play_time = 0.0;
 
-        for chunk in data.chunks_mut(chunk_size) {
+        loop {
             {
                 let p = player.lock().unwrap();
                 if !p.is_playing {
+                    let _ = child.kill();
                     break;
                 }
             }
+
+            let mut bytes_read = 0;
+            while bytes_read < chunk_size {
+                match stdout.read(&mut buffer[bytes_read..]) {
+                    Ok(0) => break,
+                    Ok(n) => bytes_read += n,
+                    Err(_) => break,
+                }
+            }
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            let chunk = &mut buffer[..bytes_read];
+            let chunk_duration = (chunk.len() as f32 / 4.0) / 48000.0;
 
             let target_time = current_play_time;
             let elapsed = start_time.elapsed().as_secs_f32();
@@ -165,7 +175,6 @@ impl AudioPlayer {
                 std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut i16, chunk.len() / 2)
             };
 
-            // Apply Volume
             for i in (0..samples.len()).step_by(2) {
                 let left = samples[i] as f32 * current_volume;
                 let right = samples[i + 1] as f32 * current_volume;
@@ -180,9 +189,11 @@ impl AudioPlayer {
                     if let Err(e) = port.write_all(chunk) {
                         p.last_error = Some(format!("Failed to write to serial port: {}", e));
                         p.port = None;
+                        let _ = child.kill();
                         break;
                     }
                 } else {
+                    let _ = child.kill();
                     break;
                 }
             }
@@ -199,6 +210,8 @@ impl AudioPlayer {
                 };
             }
         }
+
+        let _ = child.wait();
 
         let mut p = player.lock().unwrap();
         p.is_playing = false;
@@ -217,7 +230,7 @@ impl AudioPlayer {
             });
             p.is_playing = true;
             p.progress = 0.0;
-            p.total_duration = 0.0; // infinite
+            p.total_duration = 0.0;
             p.current_duration = 0.0;
 
             if let Some(ref mut port) = p.port {
@@ -237,7 +250,6 @@ impl AudioPlayer {
             }
         };
 
-        // Channel for audio chunks
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
 
         let player_for_writer = player.clone();
@@ -290,7 +302,7 @@ impl AudioPlayer {
 
         let mode = StreamMode::EventsShared {
             autoconvert: true,
-            buffer_duration_hns: 200_000, // 20ms
+            buffer_duration_hns: 200_000,
         };
 
         let fmt = match client.initialize_client(&desired, &Direction::Capture, &mode) {
@@ -308,7 +320,9 @@ impl AudioPlayer {
                 };
                 if let Err(e) = client.initialize_client(&mix, &Direction::Capture, &mode) {
                     let mut p = player.lock().unwrap();
-                    p.last_error = Some(format!("WASAPI: initialize_client failed for desired and mix: {e}"));
+                    p.last_error = Some(format!(
+                        "WASAPI: initialize_client failed for desired and mix: {e}"
+                    ));
                     p.is_playing = false;
                     p.current_file = None;
                     return;
@@ -362,7 +376,6 @@ impl AudioPlayer {
         let start_time = Instant::now();
         let mut deque: VecDeque<u8> = VecDeque::new();
 
-        // choose chunk size as multiple of bytes_per_frame
         let mut chunk_bytes = 4096;
         chunk_bytes -= chunk_bytes % bytes_per_frame;
         if chunk_bytes == 0 {
@@ -376,14 +389,11 @@ impl AudioPlayer {
                     break;
                 }
                 if p.port.is_none() {
-                    // no port: stop
                     break;
                 }
             }
 
-            if evt.wait_for_event(2000).is_err() {
-                // timeout is OK; keep looping
-            }
+            if evt.wait_for_event(2000).is_err() {}
 
             loop {
                 let next = match capture.get_next_packet_size() {
@@ -406,7 +416,6 @@ impl AudioPlayer {
                 }
             }
 
-            // While we have enough bytes, send them
             while deque.len() >= chunk_bytes {
                 let mut chunk: Vec<u8> = deque.drain(..chunk_bytes).collect();
 
@@ -414,7 +423,6 @@ impl AudioPlayer {
 
                 match sample_type {
                     SampleType::Int => {
-                        // assumes 16-bit
                         if fmt.get_bitspersample() == 16 {
                             let samples = unsafe {
                                 std::slice::from_raw_parts_mut(
@@ -450,7 +458,7 @@ impl AudioPlayer {
                 {
                     let mut p = player.lock().unwrap();
                     p.current_duration = start_time.elapsed().as_secs_f32();
-                    p.progress = 0.0; // infinite stream
+                    p.progress = 0.0;
                 }
             }
         }
@@ -464,30 +472,147 @@ impl AudioPlayer {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaybackMode {
+    Idle,
+    File,
+    Loopback,
+}
+
+#[derive(Clone)]
+struct PlayerSnapshot {
+    connected: bool,
+    is_playing: bool,
+    volume: f32,
+
+    queue: Vec<AudioFile>,
+    current_file: Option<AudioFile>,
+
+    progress: f32,
+    current_duration: f32,
+    total_duration: f32,
+
+    last_error: Option<String>,
+    mode: PlaybackMode,
+}
+
+impl PlayerSnapshot {
+    fn from_player(p: &AudioPlayer) -> Self {
+        let mode = if p.is_playing {
+            match p.current_file.as_ref().map(|f| f.name.as_str()) {
+                Some("System Audio (Loopback)") => PlaybackMode::Loopback,
+                Some(_) => PlaybackMode::File,
+                None => PlaybackMode::File,
+            }
+        } else {
+            PlaybackMode::Idle
+        };
+
+        Self {
+            connected: p.port.is_some(),
+            is_playing: p.is_playing,
+            volume: p.volume,
+            queue: p.queue.iter().cloned().collect(),
+            current_file: p.current_file.clone(),
+            progress: p.progress,
+            current_duration: p.current_duration,
+            total_duration: p.total_duration,
+            last_error: p.last_error.clone(),
+            mode,
+        }
+    }
+}
+
 struct App {
     player: Arc<Mutex<AudioPlayer>>,
+
     available_ports: Vec<String>,
-    selected_port: String,
-    _file_path: String,
+    selected_port: Option<String>,
+
     playback_thread: Option<thread::JoinHandle<()>>,
     system_thread: Option<thread::JoinHandle<()>>,
+
+    autoscroll_queue: bool,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let ports = serialport::available_ports()
+        let mut app = Self {
+            player: Arc::new(Mutex::new(AudioPlayer::default())),
+            available_ports: vec![],
+            selected_port: None,
+            playback_thread: None,
+            system_thread: None,
+            autoscroll_queue: true,
+        };
+        app.refresh_ports();
+        if let Some(first) = app.available_ports.first().cloned() {
+            app.selected_port = Some(first);
+        }
+        app
+    }
+}
+
+impl App {
+    fn refresh_ports(&mut self) {
+        self.available_ports = serialport::available_ports()
             .unwrap_or_default()
             .into_iter()
             .map(|p| p.port_name)
             .collect();
 
-        Self {
-            player: Arc::new(Mutex::new(AudioPlayer::default())),
-            available_ports: ports,
-            selected_port: String::new(),
-            _file_path: String::new(),
-            playback_thread: None,
-            system_thread: None,
+        if let Some(sel) = self.selected_port.clone() {
+            if !self.available_ports.iter().any(|p| p == &sel) {
+                self.selected_port = self.available_ports.first().cloned();
+            }
+        } else {
+            self.selected_port = self.available_ports.first().cloned();
+        }
+    }
+
+    fn connect_selected(&mut self) {
+        let Some(port_name) = self.selected_port.clone() else {
+            return;
+        };
+
+        if let Ok(mut p) = self.player.lock() {
+            p.last_error = None;
+        }
+
+        match serialport::new(&port_name, 115200)
+            .timeout(Duration::from_millis(1000))
+            .open()
+        {
+            Ok(port) => {
+                if let Ok(mut p) = self.player.lock() {
+                    p.port = Some(port);
+                }
+            }
+            Err(e) => {
+                if let Ok(mut p) = self.player.lock() {
+                    p.last_error = Some(format!("Failed to open port {}: {}", port_name, e));
+                }
+            }
+        }
+    }
+
+    fn disconnect(&mut self) {
+        if let Ok(mut p) = self.player.lock() {
+            p.is_playing = false;
+            p.port = None;
+        }
+    }
+
+    fn cleanup_finished_threads(&mut self) {
+        if let Some(h) = &self.playback_thread {
+            if h.is_finished() {
+                let _ = self.playback_thread.take().unwrap().join();
+            }
+        }
+        if let Some(h) = &self.system_thread {
+            if h.is_finished() {
+                let _ = self.system_thread.take().unwrap().join();
+            }
         }
     }
 }
@@ -506,109 +631,134 @@ fn format_duration(seconds: f32) -> String {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut content_rect = egui::Rect::NOTHING;
-        egui::CentralPanel::default().show(ctx, |ui| {
+        self.cleanup_finished_threads();
+
+        let snap = self
+            .player
+            .lock()
+            .ok()
+            .map(|p| PlayerSnapshot::from_player(&p));
+
+        let Some(snap) = snap else {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.colored_label(egui::Color32::RED, "Player mutex poisoned / unavailable.");
+            });
+            return;
+        };
+
+        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label("Port:");
-                egui::ComboBox::from_label("")
-                    .selected_text(&self.selected_port)
+                ui.heading("USB Audio Player");
+                ui.add_space(12.0);
+
+                ui.separator();
+
+                ui.label("Serial port:");
+                egui::ComboBox::from_id_salt("port_combo")
+                    .selected_text(self.selected_port.clone().unwrap_or_else(|| "None".into()))
                     .show_ui(ui, |ui| {
-                        for port in &self.available_ports {
-                            ui.selectable_value(&mut self.selected_port, port.clone(), port);
+                        for p in &self.available_ports {
+                            ui.selectable_value(&mut self.selected_port, Some(p.clone()), p);
                         }
                     });
-                if ui.button("Connect").clicked() {
-                    if !self.selected_port.is_empty() {
-                        if let Ok(mut player) = self.player.lock() {
-                            player.last_error = None;
-                        }
-                        match serialport::new(&self.selected_port, 115200)
-                            .timeout(Duration::from_millis(1000))
-                            .open()
-                        {
-                            Ok(port) => {
-                                if let Ok(mut player) = self.player.lock() {
-                                    player.port = Some(port);
-                                    println!("Connected to {}", self.selected_port);
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to open port {}: {}", self.selected_port, e);
-                            }
-                        }
-                    }
+
+                if ui.button("Refresh").clicked() {
+                    self.refresh_ports();
                 }
-            });
 
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui.button("Select audio file").clicked() {
-                    if let Some(path) = FileDialog::new()
-                        .add_filter("Audio files", &["mp3", "wav", "flac", "ogg", "m4a", "aac"])
-                        .pick_file()
+                if snap.connected {
+                    if ui.button("Disconnect").clicked() {
+                        self.disconnect();
+                    }
+                    ui.colored_label(egui::Color32::GREEN, "Connected");
+                } else {
+                    let can_connect = self.selected_port.is_some();
+                    if ui
+                        .add_enabled(can_connect, egui::Button::new("Connect"))
+                        .clicked()
                     {
-                        let file_name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("Unknown")
-                            .to_string();
-                        let audio_file = AudioFile {
-                            path: path.to_string_lossy().to_string(),
-                            name: file_name,
-                        };
-                        if let Ok(mut player) = self.player.lock() {
-                            player.queue.push_back(audio_file);
-                        }
+                        self.connect_selected();
                     }
+                    ui.colored_label(egui::Color32::RED, "Not connected");
                 }
             });
 
-            ui.label("Queue:");
-            let mut to_remove = None;
-            if let Ok(player) = self.player.lock() {
-                let queue = &player.queue;
-                for (i, file) in queue.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{}. {}", i + 1, file.name));
-                        if ui.button("Remove").clicked() {
-                            to_remove = Some(i);
-                        }
+            if let Some(err) = &snap.last_error {
+                ui.add_space(6.0);
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(60, 0, 0))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.colored_label(egui::Color32::LIGHT_RED, format!("Error: {err}"));
                     });
-                }
-            }
-            if let Some(index) = to_remove {
-                if let Ok(mut player) = self.player.lock() {
-                    player.queue.remove(index);
-                }
             }
 
-            ui.separator();
+            ui.add_space(6.0);
+        });
 
+        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
+            let port_connected = snap.connected;
+            let has_queue = !snap.queue.is_empty();
+            let is_playing = snap.is_playing;
+            let is_loopback = snap.mode == PlaybackMode::Loopback;
+
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let (queue_has_tracks, is_playing, port_connected) =
-                    if let Ok(player) = self.player.lock() {
-                        (
-                            !player.queue.is_empty(),
-                            player.is_playing,
-                            player.port.is_some(),
-                        )
-                    } else {
-                        (false, false, false)
-                    };
+                let play_label = if is_playing { "Pause" } else { "Play" };
 
-                if ui.button("Play").clicked() && queue_has_tracks && port_connected {
-                    if let Ok(mut player) = self.player.lock() {
-                        player.last_error = None;
-                        if is_playing {
-                            // Stop and clear current track
-                            player.is_playing = false;
+                let play_clicked = ui
+                    .add_enabled(
+                        port_connected && (has_queue || is_playing) && !is_loopback,
+                        egui::Button::new(play_label),
+                    )
+                    .on_hover_text("Play the next queued file (or pause current file playback).")
+                    .clicked();
+
+                if play_clicked {
+                    if let Ok(mut p) = self.player.lock() {
+                        p.last_error = None;
+                        p.is_playing = !p.is_playing;
+
+                        if p.is_playing && p.current_file.is_none() {
+                            if let Some(file) = p.queue.pop_front() {
+                                let player_clone = Arc::clone(&self.player);
+                                self.playback_thread = Some(thread::spawn(move || {
+                                    AudioPlayer::play_file(player_clone, file);
+                                }));
+                            } else {
+                                p.is_playing = false;
+                            }
                         }
-                        // if let Some(thread) = self.playback_thread.take() {
-                        //     let _ = thread.join();
-                        // }
-                        // Start next track
-                        if let Some(file) = player.queue.pop_front() {
+                    }
+                }
+
+                if ui
+                    .add_enabled(is_playing, egui::Button::new("Stop"))
+                    .on_hover_text("Stop playback/capture.")
+                    .clicked()
+                {
+                    if let Ok(mut p) = self.player.lock() {
+                        p.is_playing = false;
+                    }
+                }
+
+                if ui
+                    .add_enabled(
+                        port_connected && has_queue && !is_loopback,
+                        egui::Button::new("Skip"),
+                    )
+                    .on_hover_text("Stop current file and start the next one in queue.")
+                    .clicked()
+                {
+                    if let Ok(mut p) = self.player.lock() {
+                        p.is_playing = false;
+                        p.current_file = None;
+                    }
+                    if let Ok(mut p) = self.player.lock() {
+                        if let Some(file) = p.queue.pop_front() {
+                            p.is_playing = true;
                             let player_clone = Arc::clone(&self.player);
                             self.playback_thread = Some(thread::spawn(move || {
                                 AudioPlayer::play_file(player_clone, file);
@@ -616,77 +766,208 @@ impl eframe::App for App {
                         }
                     }
                 }
-                if ui.button("Stop").clicked() {
-                    if let Ok(mut player) = self.player.lock() {
-                        player.is_playing = false;
-                    }
-                }
-                if ui.button("Capture System Audio").clicked() && port_connected {
-                    if let Ok(mut player) = self.player.lock() {
-                        player.last_error = None;
-                        // stop file playback if any
-                        player.is_playing = false;
+
+                ui.separator();
+
+                if ui
+                    .add_enabled(
+                        port_connected && !is_playing,
+                        egui::Button::new("Capture System Audio"),
+                    )
+                    .on_hover_text("Starts WASAPI loopback streaming.")
+                    .clicked()
+                {
+                    if let Ok(mut p) = self.player.lock() {
+                        p.last_error = None;
+                        p.is_playing = false;
                     }
                     let player_clone = Arc::clone(&self.player);
                     self.system_thread = Some(thread::spawn(move || {
                         AudioPlayer::capture_system_audio(player_clone);
                     }));
                 }
-                let mut volume = 1.0;
-                if let Ok(mut player) = self.player.lock() {
-                    ui.add(egui::Slider::new(&mut player.volume, 0.0..=2.0).text("Volume"));
-                } else {
-                    ui.add(egui::Slider::new(&mut volume, 0.0..=2.0).text("Volume"));
-                }
-            });
 
-            ui.separator();
+                ui.separator();
 
-            if let Ok(player) = self.player.lock() {
-                if let Some(ref err) = player.last_error {
-                    ui.colored_label(egui::Color32::RED, format!("Error: {}", err));
-                }
-                if player.is_playing {
-                    if let Some(ref file) = player.current_file {
-                        ui.label(format!("Now playing: {}", file.name));
-                        ui.label(format!(
-                            "{} / {}",
-                            format_duration(player.current_duration),
-                            format_duration(player.total_duration)
-                        ));
+                let mut new_vol = snap.volume;
+                ui.label("Volume");
+                ui.add(egui::Slider::new(&mut new_vol, 0.0..=2.0).show_value(true));
+                if (new_vol - snap.volume).abs() > f32::EPSILON {
+                    if let Ok(mut p) = self.player.lock() {
+                        p.volume = new_vol;
                     }
                 }
-                if player.port.is_some() {
-                    ui.colored_label(egui::Color32::GREEN, "Connected");
-                } else {
-                    ui.colored_label(egui::Color32::RED, "Not connected");
-                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.checkbox(&mut self.autoscroll_queue, "Auto-scroll queue");
+                });
+            });
+
+            ui.add_space(4.0);
+            let title = match (&snap.current_file, snap.mode) {
+                (Some(f), PlaybackMode::Loopback) => format!("Capturing: {}", f.name),
+                (Some(f), PlaybackMode::File) => format!("Playing: {}", f.name),
+                _ => "Idle".to_string(),
+            };
+            ui.label(title);
+
+            if snap.mode == PlaybackMode::File && snap.total_duration > 0.0 {
+                ui.horizontal(|ui| {
+                    ui.label(format_duration(snap.current_duration));
+                    ui.add(
+                        egui::ProgressBar::new(snap.progress.clamp(0.0, 1.0))
+                            .desired_width(f32::INFINITY)
+                            .show_percentage(),
+                    );
+                    ui.label(format_duration(snap.total_duration));
+                });
+            } else if snap.mode == PlaybackMode::Loopback {
+                ui.horizontal(|ui| {
+                    ui.label(format_duration(snap.current_duration));
+                    ui.add(
+                        egui::ProgressBar::new(0.5)
+                            .desired_width(f32::INFINITY)
+                            .animate(true)
+                            .text("Streaming…"),
+                    );
+                });
             }
-            content_rect = ui.min_rect();
+
+            ui.add_space(4.0);
         });
 
-        let current_size = ctx
-            .input(|i| i.viewport().inner_rect)
-            .map(|r| r.size())
-            .unwrap_or(egui::Vec2::new(500.0, 300.0));
-        let desired_height = content_rect.bottom() + 8.0;
-        if (current_size.y - desired_height).abs() > 5.0 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(
-                current_size.x,
-                desired_height,
-            )));
-        }
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(6.0);
 
-        ctx.request_repaint();
+            // egui::Frame::group(ui.style())
+            //     // .inner_margin(egui::Margin::same(10))
+            //     .show(ui, |ui| {
+
+            //     });
+
+            ui.horizontal(|ui| {
+                if ui.button("Add files").clicked() {
+                    if let Some(paths) = FileDialog::new()
+                        .add_filter("Audio files", &["mp3", "wav", "flac", "ogg", "m4a", "aac"])
+                        .pick_files()
+                    {
+                        if let Ok(mut p) = self.player.lock() {
+                            for path in paths {
+                                let file_name = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("Unknown")
+                                    .to_string();
+
+                                let audio_file = AudioFile {
+                                    path: path.to_string_lossy().to_string(),
+                                    name: file_name,
+                                };
+
+                                p.queue.push_back(audio_file);
+                            }
+                        }
+                    }
+                }
+
+                if ui.button("Clear queue").clicked() {
+                    if let Ok(mut p) = self.player.lock() {
+                        p.queue.clear();
+                    }
+                }
+
+                ui.add_space(10.0);
+            });
+
+            ui.add_space(8.0);
+
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Queue");
+                        ui.add_space(8.0);
+                        ui.small(format!("{} item(s)", snap.queue.len()));
+                    });
+
+                    ui.add_space(6.0);
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            let mut remove_idx: Option<usize> = None;
+
+                            for (i, file) in snap.queue.iter().enumerate() {
+                                let row = egui::Frame::new()
+                                    .fill(if i % 2 == 0 {
+                                        ui.visuals().faint_bg_color
+                                    } else {
+                                        ui.visuals().extreme_bg_color
+                                    })
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .inner_margin(egui::Margin::symmetric(8, 6));
+
+                                row.show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.monospace(format!("{:>2}.", i + 1));
+                                        ui.label(&file.name);
+
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui.button("Remove").clicked() {
+                                                    remove_idx = Some(i);
+                                                }
+
+                                                if ui.button("Play now").clicked() {
+                                                    if let Ok(mut p) = self.player.lock() {
+                                                        p.last_error = None;
+                                                        p.is_playing = false;
+                                                    }
+                                                    let player_clone = Arc::clone(&self.player);
+                                                    let chosen = file.clone();
+                                                    self.playback_thread =
+                                                        Some(thread::spawn(move || {
+                                                            AudioPlayer::play_file(
+                                                                player_clone,
+                                                                chosen,
+                                                            );
+                                                        }));
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+
+                                ui.add_space(4.0);
+                            }
+
+                            if let Some(idx) = remove_idx {
+                                if let Ok(mut p) = self.player.lock() {
+                                    if idx < p.queue.len() {
+                                        p.queue.remove(idx);
+                                    }
+                                }
+                            }
+                        });
+                });
+        });
+
+        if snap.is_playing {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
     }
 }
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([500.0, 300.0])
-            .with_min_inner_size([500.0, 150.0])
-            .with_resizable(false),
+            .with_inner_size([780.0, 560.0])
+            .with_min_inner_size([720.0, 480.0])
+            .with_resizable(true),
         ..Default::default()
     };
 

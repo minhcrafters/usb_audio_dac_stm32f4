@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "stm32f4xx_hal.h"
 #include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -214,22 +215,38 @@ int main(void)
         // }
 
 #ifdef ENABLE_REVERB
+        static uint32_t wet_accum = 0;
+        static uint32_t dry_accum = 0;
+        static uint8_t first_run = 1;
+
         HAL_ADC_Start(&hadc1);
-
-        HAL_ADC_PollForConversion(&hadc1, 10);
-        uint16_t wet_level = HAL_ADC_GetValue(&hadc1);
-
-        HAL_ADC_PollForConversion(&hadc1, 10);
-        uint16_t dry_level = HAL_ADC_GetValue(&hadc1);
-
+        HAL_ADC_PollForConversion(&hadc1, 1);
+        uint16_t wet_raw = HAL_ADC_GetValue(&hadc1);
+        HAL_ADC_PollForConversion(&hadc1, 1);
+        uint16_t dry_raw = HAL_ADC_GetValue(&hadc1);
         HAL_ADC_Stop(&hadc1);
+
+        if (first_run) {
+            wet_accum = wet_raw << 5;
+            dry_accum = dry_raw << 5;
+            first_run = 0;
+        } else {
+            wet_accum = wet_accum - (wet_accum >> 5) + wet_raw;
+            dry_accum = dry_accum - (dry_accum >> 5) + dry_raw;
+        }
+
+        uint16_t wet_level = wet_accum >> 5;
+        uint16_t dry_level = dry_accum >> 5;
 
         // Exponential volume scaling to fit human perception
         // 16769025 = 4095 ^ 2
         reverb_wet_level = ((uint32_t)wet_level * wet_level * 256) / 16769025;
-        LED_PWM_SetBrightness(LED_ORANGE, ((uint32_t)wet_level * wet_level * 100) / 16769025);
         reverb_dry_level = ((uint32_t)dry_level * dry_level * 256) / 16769025;
+
+        LED_PWM_SetBrightness(LED_ORANGE, ((uint32_t)wet_level * wet_level * 100) / 16769025);
         LED_PWM_SetBrightness(LED_BLUE, ((uint32_t)dry_level * dry_level * 100) / 16769025);
+
+        HAL_Delay(1);
 #endif
     }
     /* USER CODE END 3 */
@@ -723,47 +740,61 @@ void ApplyDSP(int16_t in_L, int16_t in_R, int16_t* out_L, int16_t* out_R)
 #endif
 }
 
+static inline uint32_t rb_used(uint32_t w, uint32_t r, uint32_t n)
+{
+    return (w >= r) ? (w - r) : (n - (r - w));
+}
+static inline uint32_t rb_free(uint32_t w, uint32_t r, uint32_t n)
+{
+    return (n - 1U) - rb_used(w, r, n);
+}
+
 void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
 {
     LED_PWM_SetBrightness(LED_GREEN, 100);
 
-    // Validate input length
-    if (*Len < 4) {
-        LED_PWM_SetBrightness(LED_RED, 100);
+    uint32_t bytes = *Len & ~3U; // multiple of 4
+    if (bytes < 4)
         return;
-    }
 
-    // Truncate to multiple of 4 bytes (stereo frame size)
-    *Len &= ~3U;
-    uint32_t frames = *Len / 4;
-
-    if (frames == 0) {
-        LED_PWM_SetBrightness(LED_RED, 100);
+    uint32_t frames = bytes / 4U;
+    if (frames == 0)
         return;
+
+    // Snapshot pointers once
+    uint32_t w = incoming_w_ptr;
+    uint32_t r = incoming_r_ptr;
+
+    uint32_t free_frames = rb_free(w, r, INCOMING_BUFFER_SIZE);
+    if (frames > free_frames) {
+        frames = free_frames; // drop overflow
+        bytes = frames * 4U;
+        if (bytes == 0)
+            return;
     }
 
     last_data_time = HAL_GetTick();
 
-    // Calculate available space in circular buffer
-    uint32_t available;
-    if (incoming_w_ptr >= incoming_r_ptr) {
-        available = INCOMING_BUFFER_SIZE - (incoming_w_ptr - incoming_r_ptr) - 1;
-    } else {
-        available = incoming_r_ptr - incoming_w_ptr - 1;
-    }
-    if (frames > available) {
-        frames = available; // Drop excess data to prevent overwrite
+    // Raw byte ring over incoming_buffer (int16_t interleaved stereo)
+    uint8_t* dst = (uint8_t*)incoming_buffer;
+    const uint32_t cap_bytes = INCOMING_BUFFER_SIZE * 4U; // 4 bytes per frame
+    uint32_t w_byte = w * 4U;
+
+    uint32_t first = cap_bytes - w_byte;
+    if (first > bytes)
+        first = bytes;
+
+    memcpy(dst + w_byte, Buf, first);
+    if (bytes > first) {
+        memcpy(dst, Buf + first, bytes - first);
     }
 
-    // Expects Buf to contain interleaved stereo 16-bit samples (L, R, L, R, ...)
-    for (uint32_t i = 0; i < frames; i++) {
-        incoming_buffer[incoming_w_ptr * AUDIO_CHANNELS] = (int16_t)(Buf[i * 4 + 0] | (Buf[i * 4 + 1] << 8));
-        incoming_buffer[incoming_w_ptr * AUDIO_CHANNELS + 1] = (int16_t)(Buf[i * 4 + 2] | (Buf[i * 4 + 3] << 8));
-        incoming_w_ptr = (incoming_w_ptr + 1) % INCOMING_BUFFER_SIZE;
-    }
+    // Ensure data is visible before publishing w_ptr
+    __DMB();
+
+    incoming_w_ptr = (w + frames) % INCOMING_BUFFER_SIZE;
 
     LED_PWM_SetBrightness(LED_GREEN, 0);
-    LED_PWM_SetBrightness(LED_RED, 0);
 }
 
 void ProcessAudioChunk(int16_t* output_buffer, uint32_t count)
