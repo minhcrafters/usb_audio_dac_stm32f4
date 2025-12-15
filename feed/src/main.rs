@@ -24,6 +24,7 @@ struct AudioPlayer {
     progress: f32,
     total_duration: f32,
     current_duration: f32,
+    last_error: Option<String>,
 }
 
 impl Default for AudioPlayer {
@@ -37,6 +38,7 @@ impl Default for AudioPlayer {
             progress: 0.0,
             total_duration: 0.0,
             current_duration: 0.0,
+            last_error: None,
         }
     }
 }
@@ -108,8 +110,8 @@ impl AudioPlayer {
         } {
             Ok(data) => data,
             Err(e) => {
-                eprintln!("Failed to load file {}: {}", file.path, e);
                 let mut p = player.lock().unwrap();
+                p.last_error = Some(format!("Failed to load file {}: {}", file.path, e));
                 p.is_playing = false;
                 p.current_file = None;
                 return;
@@ -176,7 +178,8 @@ impl AudioPlayer {
                 let mut p = player.lock().unwrap();
                 if let Some(ref mut port) = p.port {
                     if let Err(e) = port.write_all(chunk) {
-                        eprintln!("Failed to write to serial port: {}", e);
+                        p.last_error = Some(format!("Failed to write to serial port: {}", e));
+                        p.port = None;
                         break;
                     }
                 } else {
@@ -221,7 +224,7 @@ impl AudioPlayer {
                 match port.try_clone() {
                     Ok(cloned) => Some(cloned),
                     Err(e) => {
-                        eprintln!("Failed to clone serial port: {}", e);
+                        p.last_error = Some(format!("Failed to clone serial port: {}", e));
                         p.is_playing = false;
                         p.current_file = None;
                         return;
@@ -237,19 +240,23 @@ impl AudioPlayer {
         // Channel for audio chunks
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
 
+        let player_for_writer = player.clone();
         thread::spawn(move || {
             let mut port = writer_port.unwrap();
             while let Ok(chunk) = rx.recv() {
                 if let Err(e) = port.write_all(&chunk) {
-                    eprintln!("Writer thread: write failed: {}", e);
+                    let mut p = player_for_writer.lock().unwrap();
+                    p.last_error = Some(format!("Writer thread: write failed: {}", e));
+                    p.port = None;
+                    p.is_playing = false;
                     break;
                 }
             }
         });
 
         if initialize_mta().is_err() {
-            eprintln!("WASAPI: failed to initialize COM (MTA)");
             let mut p = player.lock().unwrap();
+            p.last_error = Some("WASAPI: failed to initialize COM (MTA)".to_string());
             p.is_playing = false;
             p.current_file = None;
             return;
@@ -260,8 +267,8 @@ impl AudioPlayer {
         let device = match enumerator.get_default_device(&Direction::Render) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("WASAPI: get_default_device failed: {e}");
                 let mut p = player.lock().unwrap();
+                p.last_error = Some(format!("WASAPI: get_default_device failed: {e}"));
                 p.is_playing = false;
                 p.current_file = None;
                 return;
@@ -271,8 +278,8 @@ impl AudioPlayer {
         let mut client = match device.get_iaudioclient() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("WASAPI: get_iaudioclient failed: {e}");
                 let mut p = player.lock().unwrap();
+                p.last_error = Some(format!("WASAPI: get_iaudioclient failed: {e}"));
                 p.is_playing = false;
                 p.current_file = None;
                 return;
@@ -292,16 +299,16 @@ impl AudioPlayer {
                 let mix = match client.get_mixformat() {
                     Ok(m) => m,
                     Err(e) => {
-                        eprintln!("WASAPI: get_mixformat failed: {e}");
                         let mut p = player.lock().unwrap();
+                        p.last_error = Some(format!("WASAPI: get_mixformat failed: {e}"));
                         p.is_playing = false;
                         p.current_file = None;
                         return;
                     }
                 };
                 if let Err(e) = client.initialize_client(&mix, &Direction::Capture, &mode) {
-                    eprintln!("WASAPI: initialize_client failed for desired and mix: {e}");
                     let mut p = player.lock().unwrap();
+                    p.last_error = Some(format!("WASAPI: initialize_client failed for desired and mix: {e}"));
                     p.is_playing = false;
                     p.current_file = None;
                     return;
@@ -314,8 +321,8 @@ impl AudioPlayer {
         let sample_type = match fmt.get_subformat() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("WASAPI: get_subformat failed: {e}");
                 let mut p = player.lock().unwrap();
+                p.last_error = Some(format!("WASAPI: get_subformat failed: {e}"));
                 p.is_playing = false;
                 p.current_file = None;
                 return;
@@ -325,8 +332,8 @@ impl AudioPlayer {
         let evt = match client.set_get_eventhandle() {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("WASAPI: set_get_eventhandle failed: {e}");
                 let mut p = player.lock().unwrap();
+                p.last_error = Some(format!("WASAPI: set_get_eventhandle failed: {e}"));
                 p.is_playing = false;
                 p.current_file = None;
                 return;
@@ -336,8 +343,8 @@ impl AudioPlayer {
         let capture = match client.get_audiocaptureclient() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("WASAPI: get_audiocaptureclient failed: {e}");
                 let mut p = player.lock().unwrap();
+                p.last_error = Some(format!("WASAPI: get_audiocaptureclient failed: {e}"));
                 p.is_playing = false;
                 p.current_file = None;
                 return;
@@ -345,8 +352,8 @@ impl AudioPlayer {
         };
 
         if let Err(e) = client.start_stream() {
-            eprintln!("WASAPI: start_stream failed: {e}");
             let mut p = player.lock().unwrap();
+            p.last_error = Some(format!("WASAPI: start_stream failed: {e}"));
             p.is_playing = false;
             p.current_file = None;
             return;
@@ -382,7 +389,9 @@ impl AudioPlayer {
                 let next = match capture.get_next_packet_size() {
                     Ok(n) => n.unwrap_or(0),
                     Err(e) => {
-                        eprintln!("WASAPI: get_next_packet_size failed: {e}");
+                        let mut p = player.lock().unwrap();
+                        p.last_error = Some(format!("WASAPI: get_next_packet_size failed: {e}"));
+                        p.is_playing = false;
                         break;
                     }
                 };
@@ -390,7 +399,9 @@ impl AudioPlayer {
                     break;
                 }
                 if let Err(e) = capture.read_from_device_to_deque(&mut deque) {
-                    eprintln!("WASAPI: read_from_device_to_deque failed: {e}");
+                    let mut p = player.lock().unwrap();
+                    p.last_error = Some(format!("WASAPI: read_from_device_to_deque failed: {e}"));
+                    p.is_playing = false;
                     break;
                 }
             }
@@ -508,6 +519,9 @@ impl eframe::App for App {
                     });
                 if ui.button("Connect").clicked() {
                     if !self.selected_port.is_empty() {
+                        if let Ok(mut player) = self.player.lock() {
+                            player.last_error = None;
+                        }
                         match serialport::new(&self.selected_port, 115200)
                             .timeout(Duration::from_millis(1000))
                             .open()
@@ -585,6 +599,7 @@ impl eframe::App for App {
 
                 if ui.button("Play").clicked() && queue_has_tracks && port_connected {
                     if let Ok(mut player) = self.player.lock() {
+                        player.last_error = None;
                         if is_playing {
                             // Stop and clear current track
                             player.is_playing = false;
@@ -608,6 +623,7 @@ impl eframe::App for App {
                 }
                 if ui.button("Capture System Audio").clicked() && port_connected {
                     if let Ok(mut player) = self.player.lock() {
+                        player.last_error = None;
                         // stop file playback if any
                         player.is_playing = false;
                     }
@@ -627,6 +643,9 @@ impl eframe::App for App {
             ui.separator();
 
             if let Ok(player) = self.player.lock() {
+                if let Some(ref err) = player.last_error {
+                    ui.colored_label(egui::Color32::RED, format!("Error: {}", err));
+                }
                 if player.is_playing {
                     if let Some(ref file) = player.current_file {
                         ui.label(format!("Now playing: {}", file.name));

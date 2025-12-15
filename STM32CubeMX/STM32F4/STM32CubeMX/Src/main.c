@@ -225,10 +225,11 @@ int main(void)
         HAL_ADC_Stop(&hadc1);
 
         // Exponential volume scaling to fit human perception
-        reverb_wet_level = ((uint32_t)wet_level * wet_level * 256) / 16769025; // 4095 ^ 2
-        LED_PWM_SetBrightness(LED_ORANGE, (wet_level * 100) / 4095);
-        reverb_dry_level = ((uint32_t)dry_level * dry_level * 256) / 16769025; // 4095 ^ 2
-        LED_PWM_SetBrightness(LED_BLUE, (dry_level * 100) / 4095);
+        // 16769025 = 4095 ^ 2
+        reverb_wet_level = ((uint32_t)wet_level * wet_level * 256) / 16769025;
+        LED_PWM_SetBrightness(LED_ORANGE, ((uint32_t)wet_level * wet_level * 100) / 16769025);
+        reverb_dry_level = ((uint32_t)dry_level * dry_level * 256) / 16769025;
+        LED_PWM_SetBrightness(LED_BLUE, ((uint32_t)dry_level * dry_level * 100) / 16769025);
 #endif
     }
     /* USER CODE END 3 */
@@ -724,11 +725,11 @@ void ApplyDSP(int16_t in_L, int16_t in_R, int16_t* out_L, int16_t* out_R)
 
 void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
 {
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
+    LED_PWM_SetBrightness(LED_GREEN, 100);
 
     // Validate input length
     if (*Len < 4) {
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+        LED_PWM_SetBrightness(LED_RED, 100);
         return;
     }
 
@@ -737,7 +738,7 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
     uint32_t frames = *Len / 4;
 
     if (frames == 0) {
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+        LED_PWM_SetBrightness(LED_RED, 100);
         return;
     }
 
@@ -761,7 +762,8 @@ void CDC_On_Receive(uint8_t* Buf, uint32_t* Len)
         incoming_w_ptr = (incoming_w_ptr + 1) % INCOMING_BUFFER_SIZE;
     }
 
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
+    LED_PWM_SetBrightness(LED_GREEN, 0);
+    LED_PWM_SetBrightness(LED_RED, 0);
 }
 
 void ProcessAudioChunk(int16_t* output_buffer, uint32_t count)
