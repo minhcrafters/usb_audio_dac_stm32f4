@@ -663,7 +663,7 @@ impl eframe::App for App {
                         }
                     });
 
-                if ui.button("Refresh").clicked() {
+                if ui.button("↻").clicked() {
                     self.refresh_ports();
                 }
 
@@ -965,7 +965,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([780.0, 560.0])
+            .with_inner_size([780.0, 480.0])
             .with_min_inner_size([720.0, 480.0])
             .with_resizable(true),
         ..Default::default()
