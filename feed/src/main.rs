@@ -25,6 +25,7 @@ struct AudioPlayer {
     total_duration: f32,
     current_duration: f32,
     last_error: Option<String>,
+    playback_id: u64,
 }
 
 impl Default for AudioPlayer {
@@ -39,6 +40,7 @@ impl Default for AudioPlayer {
             total_duration: 0.0,
             current_duration: 0.0,
             last_error: None,
+            playback_id: 0,
         }
     }
 }
@@ -65,14 +67,15 @@ impl AudioPlayer {
     fn play_file(player: Arc<Mutex<AudioPlayer>>, file: AudioFile) {
         use std::io::Read;
 
-        {
+        let my_playback_id = {
             let mut p = player.lock().unwrap();
             p.current_file = Some(file.clone());
             p.is_playing = true;
             p.progress = 0.0;
             p.current_duration = 0.0;
             p.total_duration = 0.0;
-        }
+            p.playback_id
+        };
 
         if let Some(duration) = Self::get_duration(&file.path) {
             let mut p = player.lock().unwrap();
@@ -138,7 +141,7 @@ impl AudioPlayer {
         loop {
             {
                 let p = player.lock().unwrap();
-                if !p.is_playing {
+                if !p.is_playing || p.playback_id != my_playback_id {
                     let _ = child.kill();
                     break;
                 }
@@ -222,7 +225,7 @@ impl AudioPlayer {
     }
 
     fn capture_system_audio(player: Arc<Mutex<AudioPlayer>>) {
-        let writer_port = {
+        let (writer_port, my_playback_id) = {
             let mut p = player.lock().unwrap();
             p.current_file = Some(AudioFile {
                 path: String::new(),
@@ -235,7 +238,7 @@ impl AudioPlayer {
 
             if let Some(ref mut port) = p.port {
                 match port.try_clone() {
-                    Ok(cloned) => Some(cloned),
+                    Ok(cloned) => (Some(cloned), p.playback_id),
                     Err(e) => {
                         p.last_error = Some(format!("Failed to clone serial port: {}", e));
                         p.is_playing = false;
@@ -385,7 +388,7 @@ impl AudioPlayer {
         loop {
             {
                 let p = player.lock().unwrap();
-                if !p.is_playing {
+                if !p.is_playing || p.playback_id != my_playback_id {
                     break;
                 }
                 if p.port.is_none() {
@@ -650,7 +653,7 @@ impl eframe::App for App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("USB Audio Player");
-                ui.add_space(12.0);
+                // ui.add_space(12.0);
 
                 ui.separator();
 
@@ -723,6 +726,7 @@ impl eframe::App for App {
 
                         if p.is_playing && p.current_file.is_none() {
                             if let Some(file) = p.queue.pop_front() {
+                                p.playback_id += 1;
                                 let player_clone = Arc::clone(&self.player);
                                 self.playback_thread = Some(thread::spawn(move || {
                                     AudioPlayer::play_file(player_clone, file);
@@ -759,6 +763,7 @@ impl eframe::App for App {
                     if let Ok(mut p) = self.player.lock() {
                         if let Some(file) = p.queue.pop_front() {
                             p.is_playing = true;
+                            p.playback_id += 1;
                             let player_clone = Arc::clone(&self.player);
                             self.playback_thread = Some(thread::spawn(move || {
                                 AudioPlayer::play_file(player_clone, file);
@@ -780,6 +785,7 @@ impl eframe::App for App {
                     if let Ok(mut p) = self.player.lock() {
                         p.last_error = None;
                         p.is_playing = false;
+                        p.playback_id += 1;
                     }
                     let player_clone = Arc::clone(&self.player);
                     self.system_thread = Some(thread::spawn(move || {
@@ -924,6 +930,7 @@ impl eframe::App for App {
                                                     if let Ok(mut p) = self.player.lock() {
                                                         p.last_error = None;
                                                         p.is_playing = false;
+                                                        p.playback_id += 1;
                                                     }
                                                     let player_clone = Arc::clone(&self.player);
                                                     let chosen = file.clone();
